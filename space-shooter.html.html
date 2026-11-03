@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Космический истребитель</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden}
+  body{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:
+      radial-gradient(circle at 20% 25%, rgba(95,40,170,0.35), transparent 55%),
+      radial-gradient(circle at 80% 75%, rgba(20,95,170,0.30), transparent 55%),
+      radial-gradient(circle at 50% 50%, #0a0a2b 0%, #04030f 70%);
+    font-family:"Segoe UI",Arial,Helvetica,sans-serif;
+    touch-action:none;
+    -webkit-user-select:none;
+    user-select:none;
+  }
+  #wrap{
+    position:relative;
+    border-radius:16px;
+    overflow:hidden;
+    background:#04030f;
+    box-shadow:
+      0 0 0 1px rgba(120,200,255,0.20),
+      0 0 60px rgba(80,180,255,0.30),
+      0 0 130px rgba(120,60,255,0.22);
+  }
+  #game{
+    display:block;
+    width:100%;
+    height:100%;
+    touch-action:none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+(function () {
+'use strict';
+
+/* ======================== БАЗА ======================== */
+const canvas = document.getElementById('game');
+const wrap   = document.getElementById('wrap');
+const ctx    = canvas.getContext('2d');
+
+/* Логический размер игры — постоянный.
+   Меняется только CSS-размер окна, картинка масштабируется. */
+let W = 480, H = 640, DPR = 1;
+
+const keys = {};
+const pointer = { active: false, x: 0, y: 0 };
+
+let state = 'menu';            // 'menu' | 'playing' | 'gameover'
+let score = 0;
+let highScore = 0;
+let newRecord = false;
+let gameOverAt = 0;
+let elapsed = 0;
+let spawnTimer = 0;
+let lastTime = performance.now();
+
+const player = { x: W / 2, y: H - 110, r: 14, speed: 370, cd: 0 };
+
+let bullets = [];     // пули игрока
+let eBullets = [];    // пули врагов
+let enemies = [];
+let particles = [];
+let stars = [];
+
+try { highScore = Number(localStorage.getItem('spaceHighScore')) || 0; } catch (e) { highScore = 0; }
+
+/* ======================== УТИЛИТЫ ======================== */
+function dist2(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+/* Перевод координат мыши/пальца в логические координаты игры */
+function getPointerPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top)  * (H / r.height)
+  };
+}
+
+/* ======================== РАЗМЕР ======================== */
+function makeStars() {
+  stars = [];
+  const count = Math.min(220, Math.round((W * H) / 2500));
+  for (let i = 0; i < count; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      v: rand(18, 110),
+      r: rand(0.5, 1.8),
+      a: rand(0.2, 1),
+      c: Math.random() < 0.12 ? '#a8dcff' : (Math.random() < 0.08 ? '#ffd9b0' : '#ffffff')
+    });
+  }
+}
+
+function resize() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  /* Примерно треть страницы по ширине, но не меньше 280 и не больше 620 */
+  let w = vw / 3;
+  w = Math.max(280, Math.min(w, 620));
+
+  /* Портретные пропорции 3:4 */
+  let h = w * 4 / 3;
+
+  /* Не вылезаем за высоту окна */
+  const maxH = vh * 0.94;
+  if (h > maxH) { h = maxH; w = h * 3 / 4; }
+
+  /* Не вылезаем за ширину окна */
+  if (w > vw * 0.94) { w = vw * 0.94; h = w * 4 / 3; }
+
+  wrap.style.width  = w + 'px';
+  wrap.style.height = h + 'px';
+
+  /* Внутреннее разрешение canvas */
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  makeStars();
+
+  if (state !== 'playing') {
+    player.x = W / 2;
+    player.y = H - 110;
+  } else {
+    player.x = Math.max(24, Math.min(W - 24, player.x));
+    player.y = Math.max(70, Math.min(H - 24, player.y));
+  }
+}
+window.addEventListener('resize', resize);
+
+/* ======================== ИГРОВОЙ ПРОЦЕСС ======================== */
+function startGame() {
+  score = 0;
+  elapsed = 0;
+  spawnTimer = 0;
+  newRecord = false;
+  bullets = [];
+  eBullets = [];
+  enemies = [];
+  particles = [];
+  player.x = W / 2;
+  player.y = H - 110;
+  player.cd = 0;
+  state = 'playing';
+}
+
+function gameOver() {
+  explode(player.x, player.y, '#6ce8ff', 46, 330);
+  explode(player.x, player.y, '#ffffff', 18, 170);
+  state = 'gameover';
+  gameOverAt = performance.now();
+
+  if (score > highScore) {
+    highScore = score;
+    newRecord = true;
+    try { localStorage.setItem('spaceHighScore', String(highScore)); } catch (e) {}
+  }
+}
+
+function explode(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = speed * rand(0.2, 1.1);
+    const life = rand(0.35, 0.9);
+    particles.push({
+      x: x, y: y,
+      vx: Math.cos(a) * s,
+      vy: Math.sin(a) * s,
+      life: life,
+      maxLife: life,
+      color: color,
+      size: rand(1, 3.4)
+    });
+  }
+}
+
+function spawnEnemy() {
+  const shooterChance = Math.min(0.5, 0.12 + elapsed * 0.012);
+  const isShooter = Math.random() < shooterChance;
+  const r = isShooter ? 17 : 14;
+  const x = rand(40, Math.max(41, W - 40));
+
+  enemies.push({
+    x: x,
+    y: -50,
+    r: r,
+    vx: rand(-1, 1) * (isShooter ? 70 : 40),
+    vy: isShooter
+        ? rand(85, 130)
+        : Math.min(420, rand(130, 220) + elapsed * 3),
+    type: isShooter ? 'shooter' : 'basic',
+    hp: 1,
+    shoot: rand(0.7, 1.6)
+  });
+}
+
+/* ======================== ОБНОВЛЕНИЕ ======================== */
+function updateParticles(dt) {
+  const drag = Math.pow(0.25, dt);
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= drag;
+    p.vy *= drag;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function update(dt) {
+  /* звёзды */
+  const ss = (state === 'playing') ? 1 : 0.4;
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    s.y += s.v * ss * dt;
+    if (s.y > H + 5) { s.y = -5; s.x = Math.random() * W; }
+  }
+
+  updateParticles(dt);
+
+  if (state !== 'playing') return;
+
+  elapsed += dt;
+
+  /* ---------- игрок ---------- */
+  let mx = 0, my = 0;
+  if (keys['arrowleft'] || keys['a'] || keys['ф']) mx--;
+  if (keys['arrowright'] || keys['d'] || keys['в']) mx++;
+  if (keys['arrowup'] || keys['w'] || keys['ц']) my--;
+  if (keys['arrowdown'] || keys['s'] || keys['ы']) my++;
+
+  if (mx || my) {
+    const l = Math.hypot(mx, my);
+    player.x += (mx / l) * player.speed * dt;
+    player.y += (my / l) * player.speed * dt;
+  } else if (pointer.active) {
+    const k = Math.min(1, dt * 12);
+    player.x += (pointer.x - player.x) * k;
+    player.y += (pointer.y - 60 - player.y) * k;
+  }
+
+  player.x = Math.max(24, Math.min(W - 24, player.x));
+  player.y = Math.max(70, Math.min(H - 24, player.y));
+
+  /* ---------- стрельба игрока ---------- */
+  player.cd -= dt;
+  if (player.cd <= 0) {
+    player.cd = 0.14;
+    bullets.push({ x: player.x - 8, y: player.y - 14, vy: -920, r: 3.5 });
+    bullets.push({ x: player.x + 8, y: player.y - 14, vy: -920, r: 3.5 });
+  }
+
+  /* ---------- пули игрока ---------- */
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.y += b.vy * dt;
+    if (b.y < -25) bullets.splice(i, 1);
+  }
+
+  /* ---------- спавн врагов ---------- */
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnEnemy();
+    const base = Math.max(0.30, 0.95 - elapsed * 0.02);
+    spawnTimer = base * rand(0.7, 1.3);
+  }
+
+  /* ---------- враги ---------- */
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.y += e.vy * dt;
+    e.x += e.vx * dt;
+
+    if (e.x < 30) { e.x = 30; e.vx = Math.abs(e.vx); }
+    if (e.x > W - 30) { e.x = W - 30; e.vx = -Math.abs(e.vx); }
+
+    if (e.type === 'shooter') {
+      e.shoot -= dt;
+      if (e.shoot <= 0 && e.y > 10) {
+        e.shoot = rand(1.3, 2.4);
+        const dx = player.x - e.x;
+        const dy = player.y - e.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const sp = 320;
+        eBullets.push({ x: e.x, y: e.y + e.r * 0.6, vx: (dx / d) * sp, vy: (dy / d) * sp, r: 5 });
+      }
+    }
+
+    if (e.y > H + 60) { enemies.splice(i, 1); continue; }
+
+    /* столкновение самолёта с самолётом */
+    if (dist2(e, player) < Math.pow(e.r + player.r, 2)) {
+      explode(e.x, e.y, '#ff6b6b', 26, 280);
+      enemies.splice(i, 1);
+      gameOver();
+      return;
+    }
+  }
+
+  /* ---------- пули врагов ---------- */
+  for (let i = eBullets.length - 1; i >= 0; i--) {
+    const b = eBullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    if (b.y > H + 25 || b.y < -25 || b.x < -25 || b.x > W + 25) {
+      eBullets.splice(i, 1);
+      continue;
+    }
+    if (dist2(b, player) < Math.pow(b.r + player.r, 2)) {
+      eBullets.splice(i, 1);
+      gameOver();
+      return;
+    }
+  }
+
+  /* ---------- попадания по врагам ---------- */
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      const b = bullets[j];
+      if (dist2(e, b) < Math.pow(e.r + b.r, 2)) {
+        bullets.splice(j, 1);
+        explode(b.x, b.y, '#9df8ff', 6, 130);
+        e.hp--;
+        if (e.hp <= 0) {
+          score += (e.type === 'shooter') ? 25 : 10;
+          explode(e.x, e.y, e.type === 'shooter' ? '#ffab4d' : '#ff5c5c', 22, 250);
+          enemies.splice(i, 1);
+        }
+        break;
+      }
+    }
+  }
+}
+
+/* ======================== ОТРИСОВКА ======================== */
+function drawShip(x, y, main, glow, scale, flip, flame) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, flip ? -scale : scale);
+
+  if (flame) {
+    const f = 12 + Math.random() * 10;
+    ctx.fillStyle = 'rgba(110,220,255,0.75)';
+    ctx.beginPath();
+    ctx.moveTo(-5, 15);
+    ctx.lineTo(0, 15 + f);
+    ctx.lineTo(5, 15);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = 16;
+  ctx.fillStyle = main;
+  ctx.beginPath();
+  ctx.moveTo(0, -20);
+  ctx.lineTo(7, -3);
+  ctx.lineTo(19, 9);
+  ctx.lineTo(6, 6);
+  ctx.lineTo(4, 16);
+  ctx.lineTo(-4, 16);
+  ctx.lineTo(-6, 6);
+  ctx.lineTo(-19, 9);
+  ctx.lineTo(-7, -3);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath();
+  ctx.ellipse(0, -5, 3, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function centerText(text, y, size, color, weight) {
+  ctx.font = (weight || 'bold') + ' ' + size + 'px "Segoe UI", Arial, sans-serif';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, W / 2, y);
+}
+
+function render() {
+  /* фон */
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#04030f');
+  g.addColorStop(0.45, '#0a0a2b');
+  g.addColorStop(1, '#170736');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  /* туманности */
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const R = Math.max(W, H);
+
+  let neb = ctx.createRadialGradient(W * 0.78, H * 0.18, 0, W * 0.78, H * 0.18, R * 0.6);
+  neb.addColorStop(0, 'rgba(95,40,170,0.18)');
+  neb.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = neb;
+  ctx.fillRect(0, 0, W, H);
+
+  neb = ctx.createRadialGradient(W * 0.18, H * 0.82, 0, W * 0.18, H * 0.82, R * 0.5);
+  neb.addColorStop(0, 'rgba(20,95,170,0.15)');
+  neb.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = neb;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  /* звёзды */
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = s.c;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  /* пули игрока */
+  ctx.save();
+  ctx.shadowColor = '#4be1ff';
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = '#c9fdff';
+  for (let i = 0; i < bullets.length; i++) {
+    const b = bullets[i];
+    ctx.beginPath();
+    ctx.ellipse(b.x, b.y, b.r, b.r * 2.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  /* пули врагов */
+  ctx.save();
+  ctx.shadowColor = '#ff4d4d';
+  ctx.shadowBlur = 14;
+  for (let i = 0; i < eBullets.length; i++) {
+    const b = eBullets[i];
+    ctx.fillStyle = '#ff7a45';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff0c9';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  /* враги */
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    const sc = e.r / 14;
+    if (e.type === 'shooter') {
+      drawShip(e.x, e.y, '#ff9b3d', '#ff7a00', sc, true, false);
+    } else {
+      drawShip(e.x, e.y, '#ff4f6b', '#ff2b4e', sc, true, false);
+    }
+  }
+
+  /* частицы */
+  ctx.save();
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+
+  /* игрок */
+  if (state !== 'gameover') {
+    drawShip(player.x, player.y, '#4fd8ff', '#33c9ff', 1, false, true);
+  }
+
+  /* HUD */
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 18px "Segoe UI", Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8ef7ff';
+  ctx.shadowColor = '#0af';
+  ctx.shadowBlur = 12;
+  ctx.fillText('СЧЁТ  ' + score, 14, 30);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffd166';
+  ctx.shadowColor = '#c90';
+  ctx.fillText('РЕКОРД  ' + highScore, W - 14, 30);
+  ctx.shadowBlur = 0;
+
+  /* затемнение + меню */
+  if (state === 'menu') {
+    ctx.fillStyle = 'rgba(4,3,15,0.72)';
+    ctx.fillRect(0, 0, W, H);
+
+    const t1 = Math.min(40, W * 0.085);
+    centerText('КОСМИЧЕСКИЙ', H * 0.24, t1, '#8ef7ff');
+    centerText('ИСТРЕБИТЕЛЬ', H * 0.24 + t1 * 1.15, t1, '#8ef7ff');
+
+    const s = Math.min(16, W * 0.036);
+    centerText('Управление: ← → ↑ ↓  /  WASD', H * 0.48, s, '#cfd8ff', 'normal');
+    centerText('На телефоне — води пальцем', H * 0.48 + s * 1.8, s, '#cfd8ff', 'normal');
+    centerText('Стрельба — автоматическая', H * 0.48 + s * 3.6, s, '#9fb0e0', 'normal');
+
+    centerText('РЕКОРД: ' + highScore, H * 0.66, Math.min(22, W * 0.05), '#ffd166');
+
+    if (Math.floor(performance.now() / 500) % 2 === 0) {
+      centerText('ПРОБЕЛ или КАСАНИЕ — СТАРТ', H * 0.81, Math.min(18, W * 0.042), '#ffffff');
+    }
+  }
+
+  if (state === 'gameover') {
+    ctx.fillStyle = 'rgba(4,3,15,0.74)';
+    ctx.fillRect(0, 0, W, H);
+
+    const t1 = Math.min(36, W * 0.078);
+    centerText('ИГРА ОКОНЧЕНА', H * 0.30, t1, '#ff6b8a');
+
+    centerText('СЧЁТ: ' + score, H * 0.44, Math.min(28, W * 0.06), '#8ef7ff');
+
+    if (newRecord) {
+      centerText('🏆 НОВЫЙ РЕКОРД!', H * 0.54, Math.min(22, W * 0.05), '#ffd166');
+    } else {
+      centerText('РЕКОРД: ' + highScore, H * 0.54, Math.min(22, W * 0.05), '#ffd166');
+    }
+
+    if (performance.now() - gameOverAt > 700 &&
+        Math.floor(performance.now() / 500) % 2 === 0) {
+      centerText('ПРОБЕЛ или КАСАНИЕ — ЗАНОВО', H * 0.72, Math.min(18, W * 0.042), '#ffffff');
+    }
+  }
+}
+
+/* ======================== ГЛАВНЫЙ ЦИКЛ ======================== */
+function loop(t) {
+  let dt = (t - lastTime) / 1000;
+  lastTime = t;
+  if (dt > 0.05) dt = 0.05;
+  if (dt < 0) dt = 0;
+
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+/* ======================== ВВОД ======================== */
+window.addEventListener('keydown', function (e) {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+
+  if (k === ' ' || k === 'arrowup' || k === 'arrowdown' ||
+      k === 'arrowleft' || k === 'arrowright') {
+    e.preventDefault();
+  }
+
+  if (k === ' ' || k === 'enter') {
+    if (state === 'menu') startGame();
+    else if (state === 'gameover' && performance.now() - gameOverAt > 700) startGame();
+  }
+}, { passive: false });
+
+window.addEventListener('keyup', function (e) {
+  keys[e.key.toLowerCase()] = false;
+});
+
+canvas.addEventListener('pointerdown', function (e) {
+  e.preventDefault();
+  const now = performance.now();
+  const p = getPointerPos(e);
+
+  if (state === 'menu' || (state === 'gameover' && now - gameOverAt > 700)) {
+    startGame();
+    pointer.active = true;
+    pointer.x = p.x;
+    pointer.y = p.y;
+    return;
+  }
+
+  if (state === 'playing') {
+    pointer.active = true;
+    pointer.x = p.x;
+    pointer.y = p.y;
+  }
+}, { passive: false });
+
+canvas.addEventListener('pointermove', function (e) {
+  if (pointer.active) {
+    const p = getPointerPos(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+  }
+}, { passive: false });
+
+function endPointer() { pointer.active = false; }
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('pointerleave', endPointer);
+
+window.addEventListener('blur', function () {
+  for (const k in keys) keys[k] = false;
+  pointer.active = false;
+});
+
+/* ======================== СТАРТ ======================== */
+resize();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
